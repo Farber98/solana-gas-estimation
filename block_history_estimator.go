@@ -12,6 +12,8 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mathutil"
 )
 
+const MAX_BLOCK_HISTORY_DEPTH = 20
+
 type EstimationMethod int
 
 const (
@@ -101,7 +103,7 @@ func (bhe *BlockHistoryEstimator) calculatePrice() error {
 	case LatestBlock:
 		return bhe.calculatePriceFromLatestBlock()
 	case MultipleBlocks:
-		return bhe.calculatePriceFromMultipleBlocks()
+		return bhe.calculatePriceFromMultipleBlocks(context.Background(), 15)
 	default:
 		return fmt.Errorf("unknown estimation method")
 	}
@@ -138,8 +140,15 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromLatestBlock() error {
 	return nil
 }
 
-func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks() error {
-	ctx := context.Background()
+func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks(ctx context.Context, desiredBlockCount uint64) error {
+	if desiredBlockCount == 0 {
+		return fmt.Errorf("desiredBlockCount is zero")
+	}
+
+	if desiredBlockCount > MAX_BLOCK_HISTORY_DEPTH {
+		// Limit the desired block count to maxblockHistoryDepth
+		desiredBlockCount = MAX_BLOCK_HISTORY_DEPTH
+	}
 
 	// Fetch the latest slot
 	currentSlot, err := bhe.client.GetSlot(ctx, bhe.cfg.Commitment)
@@ -147,79 +156,78 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks() error {
 		return fmt.Errorf("[%s Estimator] Failed to get current slot: %w", bhe.estimationMethod.String(), err)
 	}
 
-	desiredBlockCount := 15
-	var allPrices []ComputeUnitPrice
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
 	// Determine the starting slot for fetching blocks
-	startSlot := currentSlot - uint64(desiredBlockCount) + 1
+	if currentSlot < desiredBlockCount {
+		return fmt.Errorf("current slot is less than desired block count")
+	}
+	startSlot := currentSlot - desiredBlockCount + 1
 
-	// Fetch the last confirmed block slots using getBlocksWithLimit
+	// Fetch the last confirmed block slots
 	confirmedSlots, err := GetBlocksWithLimit(bhe.client, startSlot, uint64(desiredBlockCount), bhe.cfg.Commitment)
 	if err != nil {
 		return fmt.Errorf("[%s Estimator] Failed to get blocks with limit: %w", bhe.estimationMethod.String(), err)
 	}
 
-	// Implement a semaphore to limit concurrency (e.g., 10 concurrent goroutines)
+	// limit concurrency (avoid hitting rate limits)
 	semaphore := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allPrices := make([]ComputeUnitPrice, 0, desiredBlockCount)
 
-	for i := len(*confirmedSlots) - 1; i >= 0 && len(allPrices) < desiredBlockCount; i-- {
+	// Iterate over the confirmed slots in reverse order to fetch most recent blocks first
+	// Iterate until we run out of slots
+	for i := len(*confirmedSlots) - 1; i >= 0; i-- {
 		slot := (*confirmedSlots)[i]
 
 		wg.Add(1)
 		go func(s uint64) {
 			defer wg.Done()
-
-			// Acquire semaphore
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			// Fetch the block details
-			block, err := GetBlock(bhe.client, s, bhe.cfg.Commitment)
-			if err != nil {
-				bhe.lgr.Printf("[%s Estimator] Failed to get block at slot %d: %v", bhe.estimationMethod.String(), s, err)
-				return
-			}
-
-			if block == nil {
-				bhe.lgr.Printf("[%s Estimator] No block found at slot %d, skipping.", bhe.estimationMethod.String(), s)
+			block, errGetBlock := GetBlock(bhe.client, slot, bhe.cfg.Commitment)
+			if errGetBlock != nil || block == nil {
+				// Failed to get block at slot || no block found at slot: skip.
 				return
 			}
 
 			// Parse the block to extract compute unit prices
-			feeData, err := ParseBlock(block)
-			if err != nil {
-				bhe.lgr.Printf("[%s Estimator] Failed to parse block at slot %d: %v", bhe.estimationMethod.String(), s, err)
+			feeData, errParseBlock := ParseBlock(block)
+			if errParseBlock != nil {
+				// Failed to parse block at slot: skip.
 				return
 			}
 
 			// Calculate the median compute unit price for the block
-			blockMedian, err := mathutil.Median(feeData.Prices...)
-			if err != nil {
-				//bhe.lgr.Printf("[%s Estimator] Failed to calculate median for slot %d: %v", bhe.estimationMethod.String(), s, err)
+			blockMedian, errMedian := mathutil.Median(feeData.Prices...)
+			if errMedian != nil {
+				//Failed to calculate median for slot: skip.
 				return
 			}
 
-			// Append the median compute unit price
+			// Append the median compute unit price if we haven't reached our desiredBlockCount
 			mu.Lock()
-			if len(allPrices) < desiredBlockCount {
+			defer mu.Unlock()
+			if uint64(len(allPrices)) < desiredBlockCount {
 				allPrices = append(allPrices, blockMedian)
-				//bhe.lgr.Printf("[%s Estimator] Collected compute unit price %d from slot %d", bhe.estimationMethod.String(), blockMedian, s)
 			}
-			mu.Unlock()
 		}(slot)
 	}
 
 	wg.Wait()
 
+	if len(allPrices) == 0 {
+		return fmt.Errorf("no compute unit prices collected")
+	}
+
 	// Calculate the median of all collected compute unit prices
 	medianPrice, err := mathutil.Median(allPrices...)
 	if err != nil {
-		return fmt.Errorf("[%s Estimator] Failed to calculate median price: %w", bhe.estimationMethod.String(), err)
+		return fmt.Errorf("failed to calculate median price: %w", err)
 	}
 
-	// Update the current price to the median of the last 10 blocks
+	// Update the current price to the median of the last desiredBlockCount
 	bhe.lock.Lock()
 	bhe.price = uint64(medianPrice)
 	bhe.lock.Unlock()
