@@ -42,6 +42,13 @@ type BlockHistoryEstimator struct {
 	stop             chan struct{}
 	wg               sync.WaitGroup
 	estimationMethod EstimationMethod
+	logCounts        LogCounts // Struct to track log counts
+}
+
+type LogCounts struct {
+	errGetBlockCount   int
+	errParseBlockCount int
+	errMedianCount     int
 }
 
 func NewBlockHistoryEstimator(client *rpc.Client, cfg Config, lgr *log.Logger, method EstimationMethod) *BlockHistoryEstimator {
@@ -52,6 +59,7 @@ func NewBlockHistoryEstimator(client *rpc.Client, cfg Config, lgr *log.Logger, m
 		price:            cfg.ComputeUnitPriceDefault,
 		stop:             make(chan struct{}),
 		estimationMethod: method,
+		logCounts:        LogCounts{}, // Initialize log counts
 	}
 }
 
@@ -81,6 +89,14 @@ func (bhe *BlockHistoryEstimator) Close() {
 	close(bhe.stop)
 	bhe.wg.Wait()
 	bhe.lgr.Printf("[%s Estimator] Stopped", bhe.estimationMethod.String())
+
+	// Log the counts of errors encountered during block processing
+	fmt.Printf("\n================== Error Analysis ==================\n")
+	fmt.Printf("[%s Estimator] Failed to get block: %d times\n", bhe.estimationMethod.String(), bhe.logCounts.errGetBlockCount)
+	fmt.Printf("[%s Estimator] Failed to parse block: %d times\n", bhe.estimationMethod.String(), bhe.logCounts.errParseBlockCount)
+	fmt.Printf("[%s Estimator] Failed to calculate median: %d times\n", bhe.estimationMethod.String(), bhe.logCounts.errMedianCount)
+	fmt.Printf("====================================================\n")
+	fmt.Println()
 }
 
 func (bhe *BlockHistoryEstimator) BaseComputeUnitPrice() (price uint64, upperBound, lowerBound bool) {
@@ -141,15 +157,6 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromLatestBlock() error {
 }
 
 func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks(ctx context.Context, desiredBlockCount uint64) error {
-	if desiredBlockCount == 0 {
-		return fmt.Errorf("desiredBlockCount is zero")
-	}
-
-	if desiredBlockCount > MAX_BLOCK_HISTORY_DEPTH {
-		// Limit the desired block count to maxblockHistoryDepth
-		desiredBlockCount = MAX_BLOCK_HISTORY_DEPTH
-	}
-
 	// Fetch the latest slot
 	currentSlot, err := bhe.client.GetSlot(ctx, bhe.cfg.Commitment)
 	if err != nil {
@@ -189,6 +196,10 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks(ctx context.C
 			block, errGetBlock := GetBlock(bhe.client, slot, bhe.cfg.Commitment)
 			if errGetBlock != nil || block == nil {
 				// Failed to get block at slot || no block found at slot: skip.
+				mu.Lock()
+				bhe.logCounts.errGetBlockCount++ // Increment the failure counter
+				mu.Unlock()
+				bhe.lgr.Printf("[%s Estimator] Failed to get block at slot %d: %v", bhe.estimationMethod.String(), slot, errGetBlock)
 				return
 			}
 
@@ -196,13 +207,28 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks(ctx context.C
 			feeData, errParseBlock := ParseBlock(block)
 			if errParseBlock != nil {
 				// Failed to parse block at slot: skip.
+				mu.Lock()
+				bhe.logCounts.errParseBlockCount++ // Increment the failure counter
+				mu.Unlock()
+				bhe.lgr.Printf("[%s Estimator] Failed to parse block at slot %d: %v", bhe.estimationMethod.String(), slot, errParseBlock)
+				return
+			}
+
+			if len(feeData.Prices) == 0 {
+				// No relevant transactions for compute unit price found in this block
 				return
 			}
 
 			// Calculate the median compute unit price for the block
-			blockMedian, errMedian := mathutil.Median(feeData.Prices...)
+			blockMedian, errMedian := mathutil.Avg(feeData.Prices...)
 			if errMedian != nil {
+				// Log the block, slot and feeData that had an error
+				bhe.lgr.Printf("[%s Estimator] Failed to calculate median for block %v at slot %d: %v", bhe.estimationMethod.String(), block, slot, errMedian)
 				//Failed to calculate median for slot: skip.
+				mu.Lock()
+				bhe.logCounts.errMedianCount++ // Increment the failure counter
+				mu.Unlock()
+				bhe.lgr.Printf("[%s Estimator] Failed to calculate median for block at slot %d: %v", bhe.estimationMethod.String(), slot, errMedian)
 				return
 			}
 

@@ -72,7 +72,7 @@ func analyzeData(latestBlockData []*TransactionData, multipleBlocksData []*Trans
 		m := metrics[estimator]
 		successRate := float64(m.includedCount) / float64(totalTransactions) * 100
 		avgDuration := m.totalDuration / time.Duration(totalTransactions)
-		avgComputePrice := m.totalComputePrice / uint64(totalTransactions)
+		//avgComputePrice := m.totalComputePrice / uint64(totalTransactions)
 		//boundedUpRate := float64(m.boundedUpCount) / float64(totalTransactions) * 100
 		//boundedDownRate := float64(m.boundedDownCount) / float64(totalTransactions) * 100
 		//totalBoundedCount := m.boundedUpCount + m.boundedDownCount
@@ -82,7 +82,7 @@ func analyzeData(latestBlockData []*TransactionData, multipleBlocksData []*Trans
 		fmt.Printf("\n====================== %s Estimator ======================\n", estimator)
 		fmt.Printf("Success Rate: %.2f%% (%d/%d)\n", successRate, m.includedCount, totalTransactions)
 		fmt.Printf("Average Inclusion Time: %v\n", avgDuration)
-		fmt.Printf("Average Compute Unit Price: %d\n", avgComputePrice)
+		//fmt.Printf("Average Compute Unit Price: %d\n", avgComputePrice)
 		fmt.Printf("Total Compute Unit Price Used: %d\n", m.totalComputePrice)
 		//fmt.Printf("Transactions Bounded By Config: %d (%.2f%%)\n", totalBoundedCount, totalBoundedRate)
 		//fmt.Printf("  - Bounded Up (Adjusted Down to Max): %d (%.2f%%)\n", m.boundedUpCount, boundedUpRate)
