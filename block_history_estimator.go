@@ -220,7 +220,8 @@ func (bhe *BlockHistoryEstimator) calculatePriceFromMultipleBlocks(ctx context.C
 			}
 
 			// Calculate the median compute unit price for the block
-			blockMedian, errMedian := mathutil.Avg(feeData.Prices...)
+			//blockMedian, errMedian := mathutil.Avg(feeData.Prices...)
+			blockMedian, errMedian := mathutil.Median(feeData.Prices...)
 			if errMedian != nil {
 				// Log the block, slot and feeData that had an error
 				bhe.lgr.Printf("[%s Estimator] Failed to calculate median for block %v at slot %d: %v", bhe.estimationMethod.String(), block, slot, errMedian)
